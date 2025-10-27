@@ -8,18 +8,20 @@ import type {
 } from "playwright";
 import Aluvia from "aluvia-ts-sdk";
 
-const ENV_MAX_RETRIES = parseInt(process.env.ALUVIA_MAX_RETRIES || "1", 10); // extra attempts after first
+const ENV_MAX_RETRIES = parseInt(process.env.ALUVIA_MAX_RETRIES || "1", 10);
 const ENV_BACKOFF_MS = parseInt(process.env.ALUVIA_BACKOFF_MS || "300", 10);
 const ENV_RETRY_ON = (
   process.env.ALUVIA_RETRY_ON ?? "ECONNRESET,ETIMEDOUT,net::ERR,Timeout"
 )
   .split(",")
-  .map((s) => s.trim())
+  .map((value) => value.trim())
   .filter(Boolean);
 
 /* Pre-compile retry patterns for performance & correctness */
-const DEFAULT_RETRY_PATTERNS: (string | RegExp)[] = ENV_RETRY_ON.map((p) =>
-  p.startsWith("/") && p.endsWith("/") ? new RegExp(p.slice(1, -1)) : p
+const DEFAULT_RETRY_PATTERNS: (string | RegExp)[] = ENV_RETRY_ON.map((value) =>
+  value.startsWith("/") && value.endsWith("/")
+    ? new RegExp(value.slice(1, -1))
+    : value
 );
 
 export type RetryPattern = string | RegExp;
@@ -49,7 +51,7 @@ export interface RetryWithProxyOptions {
   log?: boolean | ((msg: string) => void);
   /** Lifecycle hooks (optional) */
   onRetry?: (attempt: number, err: unknown) => void;
-  onProxyRotate?: (proxy: ProxySettings) => void;
+  onProxyFetch?: (proxy: ProxySettings) => void;
   onGiveUp?: (lastError: unknown) => void;
 }
 
@@ -89,8 +91,12 @@ async function getAluviaProxy(): Promise<ProxySettings> {
 
 function logMaybe(logger: RetryWithProxyOptions["log"], msg: string) {
   if (!logger) return;
-  if (logger === true) console.log(`[aluvia] ${msg}`);
-  else logger(msg);
+
+  if (logger === true) {
+    console.log(`[aluvia] ${msg}`);
+  } else {
+    logger(msg);
+  }
 }
 
 function backoffDelay(base: number, attempt: number) {
@@ -116,10 +122,10 @@ function compileRetryable(
 }
 
 function inferBrowserTypeFromPage(page: Page): BrowserType<Browser> {
-  const b = page.context().browser();
-  const bt = (b as any)?.browserType?.();
-  if (!bt) throw new Error("Cannot infer BrowserType from page");
-  return bt as BrowserType<Browser>;
+  const browser = page.context().browser();
+  const browserType = (browser as any)?.browserType?.();
+  if (!browserType) throw new Error("Cannot infer BrowserType from page");
+  return browserType as BrowserType<Browser>;
 }
 
 function throwIfAborted(signal?: AbortSignal) {
@@ -131,11 +137,11 @@ function throwIfAborted(signal?: AbortSignal) {
 }
 
 async function withOverallTimeout<T>(
-  p: Promise<T>,
+  promise: Promise<T>,
   ms?: number,
   signal?: AbortSignal
 ): Promise<T> {
-  if (!ms) return p;
+  if (!ms) return promise;
   let to: any;
   const timeout = new Promise<never>((_, rej) => {
     to = setTimeout(
@@ -144,7 +150,7 @@ async function withOverallTimeout<T>(
     );
   });
   try {
-    const result = await Promise.race([p, timeout]);
+    const result = await Promise.race([promise, timeout]);
     return result as T;
   } finally {
     clearTimeout(to);
@@ -152,13 +158,13 @@ async function withOverallTimeout<T>(
   }
 }
 
-export async function relaunchWithProxy(
+async function relaunchWithProxy(
   browserType: BrowserType<Browser>,
   launchDefaults: LaunchOptions,
   contextDefaults: BrowserContextOptions,
   proxy: ProxySettings,
   oldPage: Page,
-  opts?: { closeOldBrowser?: boolean }
+  options?: { closeOldBrowser?: boolean }
 ): Promise<{ page: Page }> {
   // Capture state/shape from old session
   const oldCtx = oldPage.context();
@@ -169,7 +175,7 @@ export async function relaunchWithProxy(
     .catch(() => undefined);
 
   // Optionally close old browser (default true)
-  if (opts?.closeOldBrowser !== false) {
+  if (options?.closeOldBrowser !== false) {
     try {
       await oldCtx.browser()?.close();
     } catch {}
@@ -211,7 +217,7 @@ export function retryWithProxy(
     overallTimeoutMs,
     log,
     onRetry,
-    onProxyRotate,
+    onProxyFetch,
     onGiveUp,
   } = options ?? {};
 
@@ -229,8 +235,8 @@ export function retryWithProxy(
         // 1) First attempt on the current page
         try {
           logMaybe(log, `First attempt: ${url}`);
-          const resp = await getRawGoto(page)(url, gotoOptions);
-          return { response: resp ?? null, page };
+          const response = await getRawGoto(page)(url, gotoOptions);
+          return { response: response ?? null, page };
         } catch (err) {
           if (!isRetryable(err)) throw err;
           logMaybe(
@@ -247,18 +253,24 @@ export function retryWithProxy(
           // backoff
           if (baseBackoffMs > 0) {
             const delay = backoffDelay(baseBackoffMs, attempt);
-            await new Promise((r) => setTimeout(r, delay));
+            await new Promise((resolve) => setTimeout(resolve, delay));
           }
 
           // proxy
-          const proxy = await getAluviaProxy().catch((e) => {
-            lastErr = e;
-            logMaybe(log, `Proxy fetch failed: ${(e as Error).message ?? e}`);
+          const proxy = await getAluviaProxy().catch((err) => {
+            lastErr = err;
+            logMaybe(
+              log,
+              `Proxy fetch failed: ${(err as Error).message ?? err}`
+            );
             return undefined;
           });
-          if (!proxy) break;
 
-          onProxyRotate?.(proxy);
+          if (!proxy) {
+            break;
+          }
+
+          onProxyFetch?.(proxy);
           logMaybe(log, `Retry #${attempt + 1} with proxy ${proxy.server}`);
 
           // relaunch
@@ -274,7 +286,7 @@ export function retryWithProxy(
             );
 
             // navigate on the new page
-            const resp = await getRawGoto(newPage)(url, {
+            const response = await getRawGoto(newPage)(url, {
               ...(gotoOptions ?? {}),
               waitUntil:
                 gotoOptions?.waitUntil ?? waitUntil ?? "domcontentloaded",
@@ -291,7 +303,7 @@ export function retryWithProxy(
               /* ignore readiness gate timeout */
             }
 
-            return { response: resp ?? null, page: newPage };
+            return { response: response ?? null, page: newPage };
           } catch (err) {
             lastErr = err;
             onRetry?.(attempt + 1, err);
