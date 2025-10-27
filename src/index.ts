@@ -197,18 +197,9 @@ function inferBrowserTypeFromPage(page: Page): BrowserType<Browser> {
 async function inferContextDefaults(
   page: Page
 ): Promise<BrowserContextOptions> {
-  const ctx = page.context();
-  const vp = page.viewportSize();
-  const ua = await page
-    .evaluate(() => navigator.userAgent)
-    .catch(() => undefined);
-  const storage = await ctx.storageState().catch(() => undefined);
-
-  return {
-    storageState: storage,
-    userAgent: ua,
-    viewport: vp ?? undefined,
-  };
+  const context = page.context();
+  const options = (context as any)._options as BrowserContextOptions;
+  return options ?? {};
 }
 
 function inferLaunchDefaults(page: Page): LaunchOptions {
