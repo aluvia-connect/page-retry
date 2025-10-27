@@ -28,6 +28,25 @@ const DEFAULT_RETRY_PATTERNS: (string | RegExp)[] = ENV_RETRY_ON.map((value) =>
 
 export type RetryPattern = string | RegExp;
 
+type GoToOptions = NonNullable<Parameters<Page["goto"]>[1]>;
+
+export interface RetryWithProxyRunner {
+  goto(
+    url: string,
+    options?: GoToOptions
+  ): Promise<{ response: Response | null; page: Page }>;
+}
+
+export type ProxySettings = {
+  server: string;
+  username?: string;
+  password?: string;
+};
+
+export interface ProxyProvider {
+  get(): Promise<ProxySettings>;
+}
+
 export interface RetryWithProxyOptions {
   /**
    * Number of retry attempts after the first failed navigation.
@@ -83,22 +102,46 @@ export interface RetryWithProxyOptions {
    * { closeOldBrowser: false }
    */
   closeOldBrowser?: boolean;
+
+  /**
+   * Optional custom proxy provider used to fetch proxy credentials.
+   *
+   * By default, `retryWithProxy` automatically uses the Aluvia API
+   * via the `aluvia-ts-sdk` and reads the API key from
+   * `process.env.ALUVIA_API_KEY`.
+   *
+   * Supplying your own `proxyProvider` allows you to integrate with
+   * any proxy rotation service, database, or in-house pool instead.
+   *
+   * A proxy provider must expose a `get()` method that returns a
+   * `Promise<ProxySettings>` object with `server`, and optionally
+   * `username` and `password` fields.
+   *
+   * @default Uses the built-in Aluvia client with `process.env.ALUVIA_API_KEY`
+   * @example
+   * ```ts
+   * import { retryWithProxy } from "playwright-proxied";
+   *
+   * // Custom proxy provider example
+   * const myProxyProvider = {
+   *   async get() {
+   *     // Pull from your own proxy pool or API
+   *     return {
+   *       server: "http://myproxy.example.com:8000",
+   *       username: "user123",
+   *       password: "secret",
+   *     };
+   *   },
+   * };
+   *
+   * const { response, page } = await retryWithProxy(page, {
+   *   proxyProvider: myProxyProvider,
+   *   maxRetries: 3,
+   * });
+   * ```
+   */
+  proxyProvider?: ProxyProvider;
 }
-
-type GoToOptions = NonNullable<Parameters<Page["goto"]>[1]>;
-
-export interface RetryWithProxyRunner {
-  goto(
-    url: string,
-    options?: GoToOptions
-  ): Promise<{ response: Response | null; page: Page }>;
-}
-
-export type ProxySettings = {
-  server: string;
-  username?: string;
-  password?: string;
-};
 
 let aluviaClient: Aluvia | undefined;
 
@@ -213,6 +256,7 @@ export function retryWithProxy(
     backoffMs = ENV_BACKOFF_MS,
     retryOn = DEFAULT_RETRY_PATTERNS,
     closeOldBrowser = true,
+    proxyProvider,
   } = options ?? {};
 
   const isRetryable = compileRetryable(retryOn);
@@ -249,10 +293,12 @@ export function retryWithProxy(
             await new Promise((resolve) => setTimeout(resolve, delay));
           }
 
-          const proxy = await getAluviaProxy().catch((err) => {
-            lastErr = err;
-            return undefined;
-          });
+          const proxy = await (proxyProvider?.get() ?? getAluviaProxy()).catch(
+            (err) => {
+              lastErr = err;
+              return undefined;
+            }
+          );
 
           if (!proxy) {
             // transient proxy issue; try next loop iteration
