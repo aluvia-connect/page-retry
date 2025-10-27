@@ -1,52 +1,83 @@
-import type {
-  Browser,
-  BrowserContextOptions,
-  BrowserType,
-  LaunchOptions,
-  Page,
-  Response,
-} from "playwright";
+import type { Page as PlaywrightPage } from "playwright";
+import puppeteer, { Page as PuppeteerPage } from "puppeteer";
+import * as playwright from "playwright";
 import Aluvia from "aluvia-ts-sdk";
 
-const DEFAULT_GOTO_TIMEOUT_MS = 15_000;
+// --- Adapter Interfaces ---
+export interface CompatPage {
+  goto(url: string, options?: any): Promise<any>;
+  url(): string;
+  title(): Promise<string>;
+  close(): Promise<void>;
+  context?(): CompatContext;
+  [key: string]: any;
+}
+export interface CompatBrowser {
+  newPage(): Promise<CompatPage>;
+  close(): Promise<void>;
+  [key: string]: any;
+}
+export interface CompatContext {
+  browser(): CompatBrowser;
+  [key: string]: any;
+}
 
-const ENV_MAX_RETRIES = Math.max(0, parseInt(process.env.ALUVIA_MAX_RETRIES || "1", 10)); // prettier-ignore
-const ENV_BACKOFF_MS  = Math.max(0, parseInt(process.env.ALUVIA_BACKOFF_MS  || "300", 10)); // prettier-ignore
-const ENV_RETRY_ON = (
-  process.env.ALUVIA_RETRY_ON ?? "ECONNRESET,ETIMEDOUT,net::ERR,Timeout"
-)
-  .split(",")
-  .map((value) => value.trim())
-  .filter(Boolean);
+// --- Playwright Adapter ---
+export function playwrightPageAdapter(page: PlaywrightPage): CompatPage {
+  return {
+    goto: page.goto.bind(page),
+    url: page.url.bind(page),
+    title: page.title.bind(page),
+    close: page.close.bind(page),
+    context: () => playwrightContextAdapter(page.context()),
+    [Symbol.for("aluvia.gotoOriginal")]: page.goto.bind(page),
+    _raw: page,
+  };
+}
+function playwrightContextAdapter(context: any): CompatContext {
+  return {
+    browser: () => playwrightBrowserAdapter(context.browser()),
+    _raw: context,
+  };
+}
+function playwrightBrowserAdapter(browser: any): CompatBrowser {
+  return {
+    newPage: async () => playwrightPageAdapter(await browser.newPage()),
+    close: browser.close.bind(browser),
+    _raw: browser,
+  };
+}
 
-/* Pre-compile retry patterns for performance & correctness */
-const DEFAULT_RETRY_PATTERNS: (string | RegExp)[] = ENV_RETRY_ON.map((value) =>
-  value.startsWith("/") && value.endsWith("/")
-    ? new RegExp(value.slice(1, -1))
-    : value
-);
+// --- Puppeteer Adapter ---
+export function puppeteerPageAdapter(page: PuppeteerPage): CompatPage {
+  return {
+    goto: page.goto.bind(page),
+    url: page.url.bind(page),
+    title: page.title.bind(page),
+    close: page.close.bind(page),
+    context: () => puppeteerContextAdapter(page.browser()),
+    [Symbol.for("aluvia.gotoOriginal")]: page.goto.bind(page),
+    _raw: page,
+  };
+}
+function puppeteerContextAdapter(browser: any): CompatContext {
+  return {
+    browser: () => puppeteerBrowserAdapter(browser),
+    _raw: browser,
+  };
+}
+function puppeteerBrowserAdapter(browser: any): CompatBrowser {
+  return {
+    newPage: async () => puppeteerPageAdapter(await browser.newPage()),
+    close: browser.close.bind(browser),
+    _raw: browser,
+  };
+}
 
+// --- Shared Types ---
 export type RetryPattern = string | RegExp;
-
-type GoToOptions = NonNullable<Parameters<Page["goto"]>[1]>;
-
-export interface RetryWithProxyRunner {
-  goto(
-    url: string,
-    options?: GoToOptions
-  ): Promise<{ response: Response | null; page: Page }>;
-}
-
-export type ProxySettings = {
-  server: string;
-  username?: string;
-  password?: string;
-};
-
-export interface ProxyProvider {
-  get(): Promise<ProxySettings>;
-}
-
+export type ProxySettings = { server: string; username?: string; password?: string; };
+export interface ProxyProvider { get(): Promise<ProxySettings>; }
 export interface RetryWithProxyOptions {
   /**
    * Number of retry attempts after the first failed navigation.
@@ -143,15 +174,26 @@ export interface RetryWithProxyOptions {
   proxyProvider?: ProxyProvider;
 }
 
-let aluviaClient: Aluvia | undefined;
+export interface RetryWithProxyRunner {
+  goto(url: string, options?: any): Promise<{ response: any; page: CompatPage }>;
+}
 
+// --- Env Defaults ---
+const DEFAULT_GOTO_TIMEOUT_MS = 15_000;
+const ENV_MAX_RETRIES = Math.max(0, parseInt(process.env.ALUVIA_MAX_RETRIES || "1", 10));
+const ENV_BACKOFF_MS  = Math.max(0, parseInt(process.env.ALUVIA_BACKOFF_MS  || "300", 10));
+const ENV_RETRY_ON = (
+  process.env.ALUVIA_RETRY_ON ?? "ECONNRESET,ETIMEDOUT,net::ERR,Timeout"
+).split(",").map((value) => value.trim()).filter(Boolean);
+const DEFAULT_RETRY_PATTERNS: (string | RegExp)[] = ENV_RETRY_ON.map((value) =>
+  value.startsWith("/") && value.endsWith("/") ? new RegExp(value.slice(1, -1)) : value
+);
+
+// --- Aluvia Proxy ---
+let aluviaClient: Aluvia | undefined;
 async function getAluviaProxy(): Promise<ProxySettings> {
   const apiKey = process.env.ALUVIA_API_KEY || "";
-  if (!apiKey) {
-    throw new Error(
-      "ALUVIA_API_KEY environment variable is required to fetch proxies."
-    );
-  }
+  if (!apiKey) throw new Error("ALUVIA_API_KEY environment variable is required to fetch proxies.");
   aluviaClient ??= new Aluvia(apiKey);
   const proxy = await aluviaClient.first();
   if (!proxy) throw new Error("Failed to get proxy from Aluvia");
@@ -162,15 +204,12 @@ async function getAluviaProxy(): Promise<ProxySettings> {
   };
 }
 
+// --- Retry Logic ---
 function backoffDelay(base: number, attempt: number) {
-  // exponential + jitter
   const jitter = Math.random() * 100;
   return base * Math.pow(2, attempt) + jitter;
 }
-
-function compileRetryable(
-  patterns: (string | RegExp)[] = DEFAULT_RETRY_PATTERNS
-): (err: unknown) => boolean {
+function compileRetryable(patterns: (string | RegExp)[] = DEFAULT_RETRY_PATTERNS) {
   return (err: unknown) => {
     if (!err) return false;
     const msg = String((err as any)?.message ?? (err as any) ?? "");
@@ -184,62 +223,142 @@ function compileRetryable(
   };
 }
 
-function inferBrowserTypeFromPage(page: Page): BrowserType<Browser> {
-  const browser = page.context().browser();
-  const browserType = (browser as any)?.browserType?.();
-  if (!browserType) {
-    throw new Error("Cannot infer BrowserType from page");
+// --- Inference Helpers (for Playwright/Puppeteer) ---
+function inferBrowserTypeFromPage(page: PlaywrightPage | PuppeteerPage): string {
+  // --- Detect Playwright ---
+  // Playwright pages have `context()` and `context().browser()`
+  if ("context" in page && typeof page.context === "function") {
+    const browser = (page as PlaywrightPage).context().browser();
+    const name =
+      (browser as any)?._name ||
+      (browser as any)?.browserType?._name;
+    if (name) return name.toLowerCase(); // "chromium", "firefox", or "webkit"
+    return "chromium";
   }
 
-  return browserType as BrowserType<Browser>;
+  // --- Detect Puppeteer ---
+  // Puppeteer pages have `browser()` directly
+  if ("browser" in page && typeof page.browser === "function") {
+    return "puppeteer";
+  }
+
+  throw new Error(
+    "Cannot infer BrowserType from page. Provide relaunch logic or adapter."
+  );
 }
 
-async function inferContextDefaults(
-  page: Page
-): Promise<BrowserContextOptions> {
-  const context = page.context();
-  const options = (context as any)._options as BrowserContextOptions;
-  return options ?? {};
+async function inferContextDefaults(page: CompatPage): Promise<any> {
+  // Playwright: context._options
+  // Puppeteer: not available, return {}
+  return page.context?.()._raw?._options ?? {};
+}
+function inferLaunchDefaults(page: CompatPage): any {
+  // Playwright: browser._options
+  // Puppeteer: not available, return {}
+  return page.context?.().browser()._raw?._options ?? {};
 }
 
-function inferLaunchDefaults(page: Page): LaunchOptions {
-  const browser = page.context().browser();
-  const options = (browser as any)._options as LaunchOptions | undefined;
-  return options ?? {};
-}
-
+// --- Relaunch With Proxy ---
 async function relaunchWithProxy(
   proxy: ProxySettings,
-  oldPage: Page,
+  oldPage: CompatPage,
   closeOldBrowser: boolean = true
-): Promise<{ page: Page }> {
-  const browserType = inferBrowserTypeFromPage(oldPage);
-  const launchDefaults = inferLaunchDefaults(oldPage);
-  const contextDefaults = await inferContextDefaults(oldPage);
+): Promise<{ browser: any; page: CompatPage }> {
+  const raw = (oldPage as any)._raw;
+  const browserTypeName = inferBrowserTypeFromPage(raw);
 
-  if (closeOldBrowser) {
-    const oldBrowser = oldPage.context().browser();
+  // --- Puppeteer logic ---
+  if (browserTypeName === "puppeteer") {
     try {
-      await oldBrowser?.close();
-    } catch {}
+      if (closeOldBrowser) {
+        try {
+          const oldBrowser = await raw.browser();
+          await oldBrowser?.close().catch(() => {});
+        } catch {}
+      }
+
+      // Get old browser and infer headless mode
+      const oldBrowser = await raw.browser();
+      const inferredHeadless = !oldBrowser?.process();
+      const args = [
+        ...(proxy?.server ? [`--proxy-server=${proxy.server}`] : []),
+        '--window-size=1280,720',
+      ];
+
+      const browser = await puppeteer.launch({
+        headless: inferredHeadless,
+        args,
+        defaultViewport: {
+          width: 1280,
+          height: 720,
+          deviceScaleFactor: 1,
+        },
+      });
+
+      const page = await browser.newPage();
+
+      if (proxy?.username && proxy?.password) {
+        await page.authenticate({
+          username: proxy.username,
+          password: proxy.password,
+        });
+      }
+
+      return { browser, page: puppeteerPageAdapter(page) };
+    } catch (err) {
+      throw new Error(`Failed to relaunch Puppeteer with proxy: ${err}`);
+    }
   }
 
-  const retryLaunch: LaunchOptions = {
-    ...launchDefaults,
-    proxy,
-  };
+  // --- Playwright logic ---
+  try {
+    const browserType = (playwright as any)[browserTypeName];
+    if (!browserType) {
+      throw new Error(`Unknown Playwright browser type: ${browserTypeName}`);
+    }
 
-  const browser = await browserType.launch(retryLaunch);
-  const context = await browser.newContext(contextDefaults);
+    const launchDefaults = inferLaunchDefaults(oldPage);
+    const contextDefaults = await inferContextDefaults(oldPage);
 
-  const page = await context.newPage();
-  return { page };
+    if (closeOldBrowser) {
+      const oldBrowser = oldPage.context?.().browser();
+      try {
+        await oldBrowser?.close();
+      } catch {}
+    }
+
+    const retryLaunch = {
+      ...launchDefaults,
+      proxy: proxy?.server
+        ? {
+            server: proxy.server,
+            username: proxy.username,
+            password: proxy.password,
+          }
+        : undefined,
+    };
+
+    const browser = await browserType.launch(retryLaunch);
+    const context = await browser.newContext(contextDefaults);
+
+    if (proxy?.username && proxy?.password) {
+      await context.setHTTPCredentials({
+        username: proxy.username,
+        password: proxy.password,
+      });
+    }
+
+    const page = await context.newPage();
+    return { browser, page: playwrightPageAdapter(page) };
+  } catch (e) {
+    throw new Error(`Failed to relaunch Playwright with proxy: ${e}`);
+  }
 }
 
+// --- Main Export ---
 const GOTO_ORIGINAL = Symbol.for("aluvia.gotoOriginal");
-
 export function retryWithProxy(
-  page: Page,
+  page: CompatPage,
   options?: RetryWithProxyOptions
 ): RetryWithProxyRunner {
   const {
@@ -251,15 +370,13 @@ export function retryWithProxy(
   } = options ?? {};
 
   const isRetryable = compileRetryable(retryOn);
-
-  /** Prefer unpatched goto to avoid recursion */
-  const getRawGoto = (p: Page) =>
-    ((p as any)[GOTO_ORIGINAL]?.bind(p) ?? p.goto.bind(p)) as Page["goto"];
+  const getRawGoto = (p: CompatPage) =>
+    ((p as any)[GOTO_ORIGINAL]?.bind(p) ?? p.goto.bind(p));
 
   return {
-    async goto(url: string, gotoOptions?: GoToOptions) {
+    async goto(url: string, gotoOptions?: any) {
       const run = async () => {
-        let basePage: Page = page;
+        let basePage: CompatPage = page;
         let lastErr: unknown;
 
         // First attempt without proxy
@@ -272,9 +389,7 @@ export function retryWithProxy(
           return { response: response ?? null, page: basePage };
         } catch (err) {
           lastErr = err;
-          if (!isRetryable(err)) {
-            throw err;
-          }
+          if (!isRetryable(err)) throw err;
         }
 
         // Retries with proxy
@@ -290,11 +405,7 @@ export function retryWithProxy(
               return undefined;
             }
           );
-
-          if (!proxy) {
-            // transient proxy issue; try next loop iteration
-            continue;
-          }
+          if (!proxy) continue;
 
           try {
             const { page: newPage } = await relaunchWithProxy(
@@ -302,49 +413,33 @@ export function retryWithProxy(
               basePage,
               closeOldBrowser
             );
-
             try {
               const response = await getRawGoto(newPage)(url, {
                 ...(gotoOptions ?? {}),
                 timeout: gotoOptions?.timeout ?? DEFAULT_GOTO_TIMEOUT_MS,
                 waitUntil: gotoOptions?.waitUntil ?? "domcontentloaded",
               });
-
-              // non-fatal readiness gate
               try {
-                await newPage.waitForFunction(
-                  () =>
-                    typeof document !== "undefined" && !!document.title?.trim(),
+                await newPage._raw?.waitForFunction?.(
+                  () => typeof document !== "undefined" && !!document.title?.trim(),
                   { timeout: DEFAULT_GOTO_TIMEOUT_MS }
                 );
               } catch {}
-
-              return {
-                response: response ?? null,
-                page: newPage,
-              };
+              return { response: response ?? null, page: newPage };
             } catch (err) {
-              // navigation on the new page failed — carry this page forward
               basePage = newPage;
               lastErr = err;
-
-              // next loop iteration will close this browser (since we pass basePage)
               continue;
             }
           } catch (err) {
-            // relaunch itself failed (no new page created)
             lastErr = err;
             continue;
           }
         }
 
-        if (lastErr instanceof Error) {
-          throw lastErr;
-        }
-
+        if (lastErr instanceof Error) throw lastErr;
         throw new Error(lastErr ? String(lastErr) : "Navigation failed");
       };
-
       return run();
     },
   };

@@ -42,7 +42,8 @@
   ],
   "sideEffects": false,
   "dependencies": {
-    "aluvia-ts-sdk": "^2.1.2"
+    "aluvia-ts-sdk": "^2.1.2",
+    "puppeteer": "^24.26.1"
   },
   "peerDependencies": {
     "playwright": ">=1.40.0"
