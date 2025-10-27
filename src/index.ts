@@ -29,10 +29,60 @@ const DEFAULT_RETRY_PATTERNS: (string | RegExp)[] = ENV_RETRY_ON.map((value) =>
 export type RetryPattern = string | RegExp;
 
 export interface RetryWithProxyOptions {
+  /**
+   * Number of retry attempts after the first failed navigation.
+   *
+   * The first `page.goto()` is always attempted without a proxy.
+   * If it fails with a retryable error (as defined by `retryOn`),
+   * the helper will fetch a new proxy and relaunch the browser.
+   *
+   * @default process.env.ALUVIA_MAX_RETRIES || 1
+   * @example
+   * // Try up to 3 proxy relaunches after the first failure
+   * { maxRetries: 3 }
+   */
   maxRetries?: number;
+
+  /**
+   * Base delay (in milliseconds) for exponential backoff between retries.
+   *
+   * Each retry waits `backoffMs * 2^attempt + random(0–100)` before continuing.
+   * Useful to avoid hammering proxy endpoints or triggering rate limits.
+   *
+   * @default process.env.ALUVIA_BACKOFF_MS || 300
+   * @example
+   * // Start with 500ms and double each time (with jitter)
+   * { backoffMs: 500 }
+   */
   backoffMs?: number;
+
+  /**
+   * List of error patterns that are considered retryable.
+   *
+   * A pattern can be a string or a regular expression. When a navigation error’s
+   * message, name, or code matches any of these, the helper will trigger a retry.
+   *
+   * @default process.env.ALUVIA_RETRY_ON
+   *          or ["ECONNRESET", "ETIMEDOUT", "net::ERR", "Timeout"]
+   * @example
+   * // Retry on connection resets and 403 responses
+   * { retryOn: ["ECONNRESET", /403/] }
+   */
   retryOn?: RetryPattern[];
-  closeOldBrowser?: boolean; // default true
+
+  /**
+   * Whether to close the old browser instance when relaunching with a new proxy.
+   *
+   * Set to `true` (default) to prevent multiple browsers from staying open,
+   * which is safer for most workflows. Set to `false` if you manage browser
+   * lifecycles manually or reuse a shared browser across tasks.
+   *
+   * @default true
+   * @example
+   * // Keep old browser open (you must close it yourself)
+   * { closeOldBrowser: false }
+   */
+  closeOldBrowser?: boolean;
 }
 
 type GoToOptions = NonNullable<Parameters<Page["goto"]>[1]>;
