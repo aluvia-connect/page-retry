@@ -31,6 +31,45 @@ describe("retryWithProxy", () => {
     page = await ctx.newPage();
   });
 
+  it("uses custom proxyProvider if provided", async () => {
+    let called = false;
+    const customProxyProvider = {
+      async get() {
+        called = true;
+        return {
+          server: "http://custom-proxy:1234",
+          username: "customuser",
+          password: "custompass",
+        };
+      },
+    };
+
+    // Force first goto to fail so proxyProvider is used
+    const original = page.goto.bind(page);
+    let failed = false;
+    page.goto = vi.fn(async (url, opts) => {
+      if (!failed) {
+        failed = true;
+        const err: any = new Error("Timeout");
+        throw err;
+      }
+      return original(url, opts);
+    }) as any;
+
+    const { page: p2 } = await retryWithProxy(page, {
+      maxRetries: 1,
+      backoffMs: 1,
+      proxyProvider: customProxyProvider,
+      closeOldBrowser: false,
+    }).goto(DATA_OK);
+
+    expect(called).toBe(true);
+    expect(await p2.title()).toBe("ok");
+
+    await p2.close();
+    page.goto = original as any;
+  });
+
   afterEach(async () => {
     try {
       await page?.context()?.close();
