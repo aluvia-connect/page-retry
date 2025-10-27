@@ -8,8 +8,10 @@ import type {
 } from "playwright";
 import Aluvia from "aluvia-ts-sdk";
 
-const ENV_MAX_RETRIES = parseInt(process.env.ALUVIA_MAX_RETRIES || "1", 10);
-const ENV_BACKOFF_MS = parseInt(process.env.ALUVIA_BACKOFF_MS || "300", 10);
+const DEFAULT_GOTO_TIMEOUT_MS = 15_000;
+
+const ENV_MAX_RETRIES = Math.max(0, parseInt(process.env.ALUVIA_MAX_RETRIES || "1", 10)); // prettier-ignore
+const ENV_BACKOFF_MS  = Math.max(0, parseInt(process.env.ALUVIA_BACKOFF_MS  || "300", 10)); // prettier-ignore
 const ENV_RETRY_ON = (
   process.env.ALUVIA_RETRY_ON ?? "ECONNRESET,ETIMEDOUT,net::ERR,Timeout"
 )
@@ -27,32 +29,17 @@ const DEFAULT_RETRY_PATTERNS: (string | RegExp)[] = ENV_RETRY_ON.map((value) =>
 export type RetryPattern = string | RegExp;
 
 export interface RetryWithProxyOptions {
-  /** Inject a BrowserType (chromium/firefox/webkit). Defaults to inferring from page. */
-  browserType?: BrowserType<Browser>;
-  /** Launch options reused on relaunch. */
   launchDefaults?: LaunchOptions;
   /** Context options reused on relaunch. */
   contextDefaults?: BrowserContextOptions;
-  /** waitUntil used on retried navigations when not provided in goto(). Defaults to "domcontentloaded". */
-  waitUntil?: NonNullable<Parameters<Page["goto"]>[1]>["waitUntil"];
   /** Number of extra retry attempts after the initial failure. Default: env ALUVIA_MAX_RETRIES or 1. */
   maxRetries?: number;
-  /** Base backoff (exponential with jitter). Default: env ALUVIA_BACKOFF_MS or 300. */
-  baseBackoffMs?: number;
+  /** Backoff (exponential with jitter). Default: env ALUVIA_BACKOFF_MS or 300. */
+  backoffMs?: number;
   /** Retry on these error patterns. Default: env ALUVIA_RETRY_ON or sane defaults. */
   retryOn?: RetryPattern[];
-  /** Close the old browser when relaunching (safer default). Set false if you manage lifecycles yourself. */
-  closeOldBrowser?: boolean;
-  /** Abort the whole operation with a signal. Optional. */
-  signal?: AbortSignal;
-  /** Hard cap across all retries (ms). Optional. */
-  overallTimeoutMs?: number;
-  /** Optional logging hook. If true, logs to console; if function, receives log lines. */
-  log?: boolean | ((msg: string) => void);
-  /** Lifecycle hooks (optional) */
-  onRetry?: (attempt: number, err: unknown) => void;
-  onProxyFetch?: (proxy: ProxySettings) => void;
-  onGiveUp?: (lastError: unknown) => void;
+
+  closeOldBrowser?: boolean; // default true
 }
 
 type GoToOptions = NonNullable<Parameters<Page["goto"]>[1]>;
@@ -89,16 +76,6 @@ async function getAluviaProxy(): Promise<ProxySettings> {
   };
 }
 
-function logMaybe(logger: RetryWithProxyOptions["log"], msg: string) {
-  if (!logger) return;
-
-  if (logger === true) {
-    console.log(`[aluvia] ${msg}`);
-  } else {
-    logger(msg);
-  }
-}
-
 function backoffDelay(base: number, attempt: number) {
   // exponential + jitter
   const jitter = Math.random() * 100;
@@ -128,43 +105,13 @@ function inferBrowserTypeFromPage(page: Page): BrowserType<Browser> {
   return browserType as BrowserType<Browser>;
 }
 
-function throwIfAborted(signal?: AbortSignal) {
-  if (signal?.aborted) {
-    const err = new Error("Operation aborted");
-    (err as any).name = "AbortError";
-    throw err;
-  }
-}
-
-async function withOverallTimeout<T>(
-  promise: Promise<T>,
-  ms?: number,
-  signal?: AbortSignal
-): Promise<T> {
-  if (!ms) return promise;
-  let to: any;
-  const timeout = new Promise<never>((_, rej) => {
-    to = setTimeout(
-      () => rej(new Error(`Operation timed out after ${ms} ms`)),
-      ms
-    );
-  });
-  try {
-    const result = await Promise.race([promise, timeout]);
-    return result as T;
-  } finally {
-    clearTimeout(to);
-    throwIfAborted(signal);
-  }
-}
-
 async function relaunchWithProxy(
   browserType: BrowserType<Browser>,
   launchDefaults: LaunchOptions,
   contextDefaults: BrowserContextOptions,
   proxy: ProxySettings,
   oldPage: Page,
-  options?: { closeOldBrowser?: boolean }
+  closeOldBrowser: boolean = true
 ): Promise<{ page: Page }> {
   // Capture state/shape from old session
   const oldCtx = oldPage.context();
@@ -174,10 +121,10 @@ async function relaunchWithProxy(
     .evaluate(() => navigator.userAgent)
     .catch(() => undefined);
 
-  // Optionally close old browser (default true)
-  if (options?.closeOldBrowser !== false) {
+  if (closeOldBrowser) {
+    const oldBrowser = oldCtx.browser();
     try {
-      await oldCtx.browser()?.close();
+      await oldBrowser?.close();
     } catch {}
   }
 
@@ -194,6 +141,7 @@ async function relaunchWithProxy(
     userAgent: ua ?? contextDefaults.userAgent,
     viewport: vp ?? contextDefaults.viewport,
   });
+
   const page = await context.newPage();
   return { page };
 }
@@ -205,20 +153,12 @@ export function retryWithProxy(
   options?: RetryWithProxyOptions
 ): RetryWithProxyRunner {
   const {
-    browserType,
     launchDefaults = {},
     contextDefaults = {},
-    waitUntil,
     maxRetries = ENV_MAX_RETRIES,
-    baseBackoffMs = ENV_BACKOFF_MS,
+    backoffMs = ENV_BACKOFF_MS,
     retryOn = DEFAULT_RETRY_PATTERNS,
     closeOldBrowser = true,
-    signal,
-    overallTimeoutMs,
-    log,
-    onRetry,
-    onProxyFetch,
-    onGiveUp,
   } = options ?? {};
 
   const isRetryable = compileRetryable(retryOn);
@@ -229,98 +169,91 @@ export function retryWithProxy(
 
   return {
     async goto(url: string, gotoOptions?: GoToOptions) {
-      throwIfAborted(signal);
-
       const run = async () => {
-        // 1) First attempt on the current page
+        let basePage: Page = page;
+        let lastErr: unknown;
+
+        // First attempt without proxy
         try {
-          logMaybe(log, `First attempt: ${url}`);
-          const response = await getRawGoto(page)(url, gotoOptions);
-          return { response: response ?? null, page };
+          const response = await getRawGoto(basePage)(url, {
+            ...(gotoOptions ?? {}),
+            timeout: gotoOptions?.timeout ?? DEFAULT_GOTO_TIMEOUT_MS,
+            waitUntil: gotoOptions?.waitUntil ?? "domcontentloaded",
+          });
+          return { response: response ?? null, page: basePage };
         } catch (err) {
+          lastErr = err;
           if (!isRetryable(err)) throw err;
-          logMaybe(
-            log,
-            `First attempt failed & retryable: ${(err as Error).message ?? err}`
-          );
         }
 
-        // 2) Retries with proxy
-        let lastErr: unknown;
+        // Retries with proxy
         for (let attempt = 0; attempt < maxRetries; attempt++) {
-          throwIfAborted(signal);
-
-          // backoff
-          if (baseBackoffMs > 0) {
-            const delay = backoffDelay(baseBackoffMs, attempt);
+          if (backoffMs > 0) {
+            const delay = backoffDelay(backoffMs, attempt);
             await new Promise((resolve) => setTimeout(resolve, delay));
           }
 
-          // proxy
           const proxy = await getAluviaProxy().catch((err) => {
             lastErr = err;
-            logMaybe(
-              log,
-              `Proxy fetch failed: ${(err as Error).message ?? err}`
-            );
             return undefined;
           });
 
           if (!proxy) {
-            break;
+            // transient proxy issue; try next loop iteration
+            continue;
           }
 
-          onProxyFetch?.(proxy);
-          logMaybe(log, `Retry #${attempt + 1} with proxy ${proxy.server}`);
-
-          // relaunch
           try {
-            const bt = browserType ?? inferBrowserTypeFromPage(page);
+            const browserType = inferBrowserTypeFromPage(basePage);
             const { page: newPage } = await relaunchWithProxy(
-              bt,
+              browserType,
               launchDefaults,
               contextDefaults,
               proxy,
-              page,
-              { closeOldBrowser }
+              basePage,
+              closeOldBrowser
             );
 
-            // navigate on the new page
-            const response = await getRawGoto(newPage)(url, {
-              ...(gotoOptions ?? {}),
-              waitUntil:
-                gotoOptions?.waitUntil ?? waitUntil ?? "domcontentloaded",
-            });
-
-            // small readiness gate (non-fatal if times out)
             try {
-              await newPage.waitForFunction(
-                () =>
-                  typeof document !== "undefined" && !!document.title?.trim(),
-                { timeout: 15000 }
-              );
-            } catch {
-              /* ignore readiness gate timeout */
-            }
+              const response = await getRawGoto(newPage)(url, {
+                ...(gotoOptions ?? {}),
+                timeout: gotoOptions?.timeout ?? DEFAULT_GOTO_TIMEOUT_MS,
+                waitUntil: gotoOptions?.waitUntil ?? "domcontentloaded",
+              });
 
-            return { response: response ?? null, page: newPage };
+              // non-fatal readiness gate
+              try {
+                await newPage.waitForFunction(
+                  () =>
+                    typeof document !== "undefined" && !!document.title?.trim(),
+                  { timeout: DEFAULT_GOTO_TIMEOUT_MS }
+                );
+              } catch {}
+
+              return {
+                response: response ?? null,
+                page: newPage,
+              };
+            } catch (err) {
+              // navigation on the new page failed — carry this page forward
+              basePage = newPage;
+              lastErr = err;
+
+              // next loop iteration will close this browser (since we pass basePage)
+              continue;
+            }
           } catch (err) {
+            // relaunch itself failed (no new page created)
             lastErr = err;
-            onRetry?.(attempt + 1, err);
-            logMaybe(
-              log,
-              `Retry #${attempt + 1} failed: ${(err as Error).message ?? err}`
-            );
-            // continue to next attempt
+            continue;
           }
         }
 
-        onGiveUp?.(lastErr);
-        throw lastErr;
+        if (lastErr instanceof Error) throw lastErr;
+        throw new Error(lastErr ? String(lastErr) : "Navigation failed");
       };
 
-      const result = await withOverallTimeout(run(), overallTimeoutMs, signal);
-      return result;
+      return run();
     },
   };
 }
