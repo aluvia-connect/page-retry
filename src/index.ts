@@ -29,16 +29,9 @@ const DEFAULT_RETRY_PATTERNS: (string | RegExp)[] = ENV_RETRY_ON.map((value) =>
 export type RetryPattern = string | RegExp;
 
 export interface RetryWithProxyOptions {
-  launchDefaults?: LaunchOptions;
-  /** Context options reused on relaunch. */
-  contextDefaults?: BrowserContextOptions;
-  /** Number of extra retry attempts after the initial failure. Default: env ALUVIA_MAX_RETRIES or 1. */
   maxRetries?: number;
-  /** Backoff (exponential with jitter). Default: env ALUVIA_BACKOFF_MS or 300. */
   backoffMs?: number;
-  /** Retry on these error patterns. Default: env ALUVIA_RETRY_ON or sane defaults. */
   retryOn?: RetryPattern[];
-
   closeOldBrowser?: boolean; // default true
 }
 
@@ -101,28 +94,53 @@ function compileRetryable(
 function inferBrowserTypeFromPage(page: Page): BrowserType<Browser> {
   const browser = page.context().browser();
   const browserType = (browser as any)?.browserType?.();
-  if (!browserType) throw new Error("Cannot infer BrowserType from page");
+  if (!browserType) {
+    throw new Error("Cannot infer BrowserType from page");
+  }
+
   return browserType as BrowserType<Browser>;
 }
 
+async function inferContextDefaults(
+  page: Page
+): Promise<BrowserContextOptions> {
+  const ctx = page.context();
+  const vp = page.viewportSize();
+  const ua = await page
+    .evaluate(() => navigator.userAgent)
+    .catch(() => undefined);
+  const storage = await ctx.storageState().catch(() => undefined);
+
+  return {
+    storageState: storage,
+    userAgent: ua,
+    viewport: vp ?? undefined,
+  };
+}
+
+function inferLaunchDefaults(page: Page): LaunchOptions {
+  const browser = page.context().browser();
+  const isHeadless =
+    browser && typeof (browser as any)._isHeadless === "boolean"
+      ? (browser as any)._isHeadless
+      : true; // fallback
+
+  return {
+    headless: isHeadless,
+  };
+}
+
 async function relaunchWithProxy(
-  browserType: BrowserType<Browser>,
-  launchDefaults: LaunchOptions,
-  contextDefaults: BrowserContextOptions,
   proxy: ProxySettings,
   oldPage: Page,
   closeOldBrowser: boolean = true
 ): Promise<{ page: Page }> {
-  // Capture state/shape from old session
-  const oldCtx = oldPage.context();
-  const state = await oldCtx.storageState().catch(() => undefined);
-  const vp = oldPage.viewportSize();
-  const ua = await oldPage
-    .evaluate(() => navigator.userAgent)
-    .catch(() => undefined);
+  const browserType = inferBrowserTypeFromPage(oldPage);
+  const launchDefaults = inferLaunchDefaults(oldPage);
+  const contextDefaults = await inferContextDefaults(oldPage);
 
   if (closeOldBrowser) {
-    const oldBrowser = oldCtx.browser();
+    const oldBrowser = oldPage.context().browser();
     try {
       await oldBrowser?.close();
     } catch {}
@@ -135,12 +153,7 @@ async function relaunchWithProxy(
   };
 
   const browser = await browserType.launch(retryLaunch);
-  const context = await browser.newContext({
-    ...contextDefaults,
-    storageState: state,
-    userAgent: ua ?? contextDefaults.userAgent,
-    viewport: vp ?? contextDefaults.viewport,
-  });
+  const context = await browser.newContext(contextDefaults);
 
   const page = await context.newPage();
   return { page };
@@ -153,8 +166,6 @@ export function retryWithProxy(
   options?: RetryWithProxyOptions
 ): RetryWithProxyRunner {
   const {
-    launchDefaults = {},
-    contextDefaults = {},
     maxRetries = ENV_MAX_RETRIES,
     backoffMs = ENV_BACKOFF_MS,
     retryOn = DEFAULT_RETRY_PATTERNS,
@@ -204,11 +215,7 @@ export function retryWithProxy(
           }
 
           try {
-            const browserType = inferBrowserTypeFromPage(basePage);
             const { page: newPage } = await relaunchWithProxy(
-              browserType,
-              launchDefaults,
-              contextDefaults,
               proxy,
               basePage,
               closeOldBrowser
@@ -249,7 +256,10 @@ export function retryWithProxy(
           }
         }
 
-        if (lastErr instanceof Error) throw lastErr;
+        if (lastErr instanceof Error) {
+          throw lastErr;
+        }
+
         throw new Error(lastErr ? String(lastErr) : "Navigation failed");
       };
 
