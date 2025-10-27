@@ -170,14 +170,8 @@ async function inferContextDefaults(
 
 function inferLaunchDefaults(page: Page): LaunchOptions {
   const browser = page.context().browser();
-  const isHeadless =
-    browser && typeof (browser as any)._isHeadless === "boolean"
-      ? (browser as any)._isHeadless
-      : true; // fallback
-
-  return {
-    headless: isHeadless,
-  };
+  const options = (browser as any)._options as LaunchOptions | undefined;
+  return options ?? {};
 }
 
 async function relaunchWithProxy(
@@ -197,7 +191,6 @@ async function relaunchWithProxy(
   }
 
   const retryLaunch: LaunchOptions = {
-    headless: launchDefaults.headless ?? true,
     ...launchDefaults,
     proxy,
   };
@@ -244,7 +237,9 @@ export function retryWithProxy(
           return { response: response ?? null, page: basePage };
         } catch (err) {
           lastErr = err;
-          if (!isRetryable(err)) throw err;
+          if (!isRetryable(err)) {
+            throw err;
+          }
         }
 
         // Retries with proxy
