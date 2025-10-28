@@ -69,6 +69,7 @@ describe("retryWithProxy (mocked Playwright)", () => {
       backoffMs: 1,
       proxyProvider: customProxyProvider,
       closeOldBrowser: false,
+      retryOn: ["Timeout", "ETIMEDOUT", /net::ERR/],
     }).goto(DATA_OK);
 
     expect(called).toBe(true);
@@ -140,6 +141,7 @@ describe("retryWithProxy (mocked Playwright)", () => {
       maxRetries: 1,
       backoffMs: 1,
       closeOldBrowser: false,
+      retryOn: ["Timeout", "ETIMEDOUT", /net::ERR/],
     }).goto(DATA_OK);
 
     expect(ctx.pages().length).toBeGreaterThan(0); // context still active
