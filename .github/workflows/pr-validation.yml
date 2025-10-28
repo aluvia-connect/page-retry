@@ -1,0 +1,86 @@
+name: Pull Request Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate PR (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20]
+
+    env:
+      ALUVIA_API_KEY: "test_key"
+      ALUVIA_MAX_RETRIES: "1"
+      ALUVIA_BACKOFF_MS: "50"
+      ALUVIA_RETRY_ON: "ETIMEDOUT,net::ERR"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build package
+        run: npm run build
+
+      - name: Dry run package
+        run: npm pack --dry-run
+
+      - name: Run security audit (moderate)
+        run: npm audit --audit-level moderate
+        continue-on-error: true
+
+      - name: Check for high vulnerabilities
+        run: |
+          if npm audit --audit-level high; then
+            echo "✅ No high-severity vulnerabilities found"
+          else
+            echo "⚠️ High-severity vulnerabilities detected"
+            exit 1
+          fi
+
+      - name: Comment PR Result
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const status = "${{ job.status }}";
+            const succeeded = status === "success";
+            const message = succeeded
+              ? '✅ **All checks passed!**\n\n- Node: ${{ matrix.node }}\n- Tests: ✅\n- Build: ✅\n- Security audit: ✅\n- Package dry-run: ✅\n\nReady for review! 🚀'
+              : '❌ **Some checks failed**\n\nPlease review the workflow logs (tests/build/audit) and fix the issues before requesting review.';
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });
