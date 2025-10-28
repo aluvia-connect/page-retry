@@ -96,18 +96,14 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body: |
-            ## What's Changed
-
-            See [CHANGELOG.md](https://github.com/xtrella/aluvia-playwright/blob/main/CHANGELOG.md) for detailed changes.
-
             ## Installation
 
             ```bash
-            npm install aluvia-playwright@${{ github.ref_name }}
+            npm install page-retry@${{ github.ref_name }}
             ```
 
             ## Documentation
 
-            Visit our [GitHub repository](https://github.com/xtrella/aluvia-playwright) for complete documentation and examples.
+            Visit our [GitHub repository](https://github.com/xtrella/page-retry) for complete documentation and examples.
           draft: false
           prerelease: false
