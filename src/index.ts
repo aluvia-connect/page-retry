@@ -141,6 +141,26 @@ export interface RetryWithProxyOptions {
    * ```
    */
   proxyProvider?: ProxyProvider;
+
+  /**
+   * Optional callback fired before each retry attempt (after backoff).
+   *
+   * @param attempt Current retry attempt index
+   * @param maxRetries Maximum number of retries
+   * @param lastError The error that triggered the retry
+   */
+  onRetry?: (
+    attempt: number,
+    maxRetries: number,
+    lastError: unknown
+  ) => unknown;
+
+  /**
+   * Optional callback fired when a proxy has been successfully fetched.
+   *
+   * @param proxy The proxy settings that were fetched or provided
+   */
+  onProxyLoaded?: (proxy: ProxySettings) => unknown;
 }
 
 let aluviaClient: Aluvia | undefined;
@@ -248,6 +268,8 @@ export function retryWithProxy(
     retryOn = DEFAULT_RETRY_PATTERNS,
     closeOldBrowser = true,
     proxyProvider,
+    onRetry,
+    onProxyLoaded,
   } = options ?? {};
 
   const isRetryable = compileRetryable(retryOn);
@@ -278,11 +300,13 @@ export function retryWithProxy(
         }
 
         // Retries with proxy
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
           if (backoffMs > 0) {
             const delay = backoffDelay(backoffMs, attempt);
             await new Promise((resolve) => setTimeout(resolve, delay));
           }
+
+          onRetry?.(attempt, maxRetries, lastErr);
 
           const proxy = await (proxyProvider?.get() ?? getAluviaProxy()).catch(
             (err) => {
@@ -295,6 +319,8 @@ export function retryWithProxy(
             // transient proxy issue; try next loop iteration
             continue;
           }
+
+          onProxyLoaded?.(proxy);
 
           try {
             const { page: newPage } = await relaunchWithProxy(
