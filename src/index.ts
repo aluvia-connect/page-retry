@@ -47,6 +47,23 @@ export interface ProxyProvider {
   get(): Promise<ProxySettings>;
 }
 
+enum AluviaErrorCode {
+  NoApiKey = "ALUVIA_NO_API_KEY",
+  NoProxy = "ALUVIA_NO_PROXIES",
+  ProxyFetchFailed = "ALUVIA_PROXY_FETCH_FAILED",
+  InsufficientBalance = "ALUVIA_INSUFFICIENT_BALANCE",
+  BalanceFetchFailed = "ALUVIA_BALANCE_FETCH_FAILED",
+}
+
+export class AluviaError extends Error {
+  code?: AluviaErrorCode;
+  constructor(message: string, code?: AluviaErrorCode) {
+    super(message);
+    this.name = "AluviaError";
+    this.code = code;
+  }
+}
+
 export interface RetryWithProxyOptions {
   /**
    * Number of retry attempts after the first failed navigation.
@@ -145,7 +162,7 @@ export interface RetryWithProxyOptions {
   /**
    * Optional callback fired before each retry attempt (after backoff).
    *
-   * @param attempt Current retry attempt index
+   * @param attempt Current retry attempt number (1-based)
    * @param maxRetries Maximum number of retries
    * @param lastError The error that triggered the retry
    */
@@ -168,18 +185,53 @@ let aluviaClient: Aluvia | undefined;
 async function getAluviaProxy(): Promise<ProxySettings> {
   const apiKey = process.env.ALUVIA_API_KEY || "";
   if (!apiKey) {
-    throw new Error(
-      "ALUVIA_API_KEY environment variable is required to fetch proxies."
+    throw new AluviaError(
+      "Missing ALUVIA_API_KEY environment variable.",
+      AluviaErrorCode.NoApiKey
     );
   }
+
   aluviaClient ??= new Aluvia(apiKey);
   const proxy = await aluviaClient.first();
-  if (!proxy) throw new Error("Failed to get proxy from Aluvia");
+
+  if (!proxy) {
+    throw new AluviaError(
+      "Failed to obtain a proxy for retry attempts. Check your balance and proxy pool at https://dashboard.aluvia.io/.",
+      AluviaErrorCode.NoProxy
+    );
+  }
+
   return {
     server: `http://${proxy.host}:${proxy.httpPort}`,
     username: proxy.username,
     password: proxy.password,
   };
+}
+
+async function getAluviaBalance() {
+  const apiKey = process.env.ALUVIA_API_KEY || "";
+  if (!apiKey) {
+    throw new AluviaError(
+      "Missing ALUVIA_API_KEY environment variable.",
+      AluviaErrorCode.NoApiKey
+    );
+  }
+
+  const response = await fetch("https://api.aluvia.io/account/status", {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new AluviaError(
+      `Failed to fetch Aluvia account status: ${response.status} ${response.statusText}`,
+      AluviaErrorCode.BalanceFetchFailed
+    );
+  }
+
+  const data = await response.json();
+  return data.data.balance_gb;
 }
 
 function backoffDelay(base: number, attempt: number) {
@@ -299,28 +351,40 @@ export function retryWithProxy(
           }
         }
 
+        if (!proxyProvider) {
+          const balance = await getAluviaBalance().catch(() => null);
+          if (balance !== null && balance <= 0) {
+            throw new AluviaError(
+              "Your Aluvia account has no remaining balance. Please top up at https://dashboard.aluvia.io/ to continue using proxies.",
+              AluviaErrorCode.InsufficientBalance
+            );
+          }
+        }
+
+        const proxy = await (proxyProvider?.get() ?? getAluviaProxy()).catch(
+          (err) => {
+            lastErr = err;
+            return undefined;
+          }
+        );
+
+        if (!proxy) {
+          throw new AluviaError(
+            "Failed to obtain a proxy for retry attempts. Check your balance and proxy pool at https://dashboard.aluvia.io/.",
+            AluviaErrorCode.ProxyFetchFailed
+          );
+        } else {
+          await onProxyLoaded?.(proxy);
+        }
+
         // Retries with proxy
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
           if (backoffMs > 0) {
-            const delay = backoffDelay(backoffMs, attempt);
+            const delay = backoffDelay(backoffMs, attempt - 1);
             await new Promise((resolve) => setTimeout(resolve, delay));
           }
 
-          onRetry?.(attempt, maxRetries, lastErr);
-
-          const proxy = await (proxyProvider?.get() ?? getAluviaProxy()).catch(
-            (err) => {
-              lastErr = err;
-              return undefined;
-            }
-          );
-
-          if (!proxy) {
-            // transient proxy issue; try next loop iteration
-            continue;
-          }
-
-          onProxyLoaded?.(proxy);
+          await onRetry?.(attempt, maxRetries, lastErr);
 
           try {
             const { page: newPage } = await relaunchWithProxy(
