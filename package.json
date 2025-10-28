@@ -1,7 +1,7 @@
 {
-  "name": "playwright-proxied",
+  "name": "page-retry",
   "version": "1.0.0",
-  "description": "Drop-in retry helper for Playwright with automatic proxy rotation via Aluvia.",
+  "description": "Automatic retry and proxy fallback for Playwright powered by Aluvia.",
   "type": "module",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
