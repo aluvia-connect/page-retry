@@ -6,7 +6,7 @@
 
 Retry failed [Playwright](https://playwright.dev) navigations automatically with proxy fallback.
 
-[Read the full documentation](https://docs.xtrella.io/docs/playwright-proxied)
+[Read the full documentation](https://docs.aluvia.io/docs/using-aluvia/page-retry-sdk)
 
 ## Installation
 
