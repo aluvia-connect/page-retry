@@ -85,18 +85,29 @@ const { response, page } = await retryWithProxy(page, {
   backoffMs: 500,
   retryOn: ["ECONNRESET", /403/],
   closeOldBrowser: false,
+  onRetry: (attempt, maxRetries, lastError) => {
+    console.log(
+      `Retry attempt ${attempt} of ${maxRetries} due to error:`,
+      lastError
+    );
+  },
+  onProxyLoaded: (proxy) => {
+    console.log(`Proxy loaded: ${proxy.server}`);
+  },
 });
 ```
 
 #### Available Options
 
-| Option            | Type                   | Default                                  | Description                                                          |
-| ----------------- | ---------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
-| `maxRetries`      | `number`               | `process.env.ALUVIA_MAX_RETRIES` or `1`  | Number of retry attempts after the first failure.                    |
-| `backoffMs`       | `number`               | `process.env.ALUVIA_BACKOFF_MS` or `300` | Base delay (in ms) between retries, grows exponentially with jitter. |
-| `retryOn`         | `(string \| RegExp)[]` | `process.env.ALUVIA_RETRY_ON`            | Error patterns considered retryable.                                 |
-| `closeOldBrowser` | `boolean`              | `true`                                   | Whether to close the old browser when relaunching.                   |
-| `proxyProvider`   | `ProxyProvider`        | Uses Aluvia SDK                          | Custom proxy provider that returns proxy credentials.                |
+| Option            | Type                                                                                 | Default                                  | Description                                                                                                   |
+| ----------------- | ------------------------------------------------------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `maxRetries`      | `number`                                                                             | `process.env.ALUVIA_MAX_RETRIES` or `1`  | Number of retry attempts after the first failure.                                                             |
+| `backoffMs`       | `number`                                                                             | `process.env.ALUVIA_BACKOFF_MS` or `300` | Base delay (in ms) between retries, grows exponentially with jitter.                                          |
+| `retryOn`         | `(string \| RegExp)[]`                                                               | `process.env.ALUVIA_RETRY_ON`            | Error patterns considered retryable.                                                                          |
+| `closeOldBrowser` | `boolean`                                                                            | `true`                                   | Whether to close the old browser when relaunching.                                                            |
+| `proxyProvider`   | `ProxyProvider`                                                                      | Uses Aluvia SDK                          | Custom proxy provider that returns proxy credentials.                                                         |
+| `onRetry`         | `(attempt: number, maxRetries: number, lastError: unknown) => void \| Promise<void>` | `undefined`                              | Callback invoked before each retry attempt.                                                                   |
+| `onProxyLoaded`   | `(proxy: ProxySettings) => void \| Promise<void>`                                    | `undefined`                              | Callback fired after a proxy has been successfully fetched (either from the Aluvia API or a custom provider). |
 
 #### Custom Proxy Provider Example
 

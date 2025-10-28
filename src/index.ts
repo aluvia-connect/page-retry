@@ -137,7 +137,7 @@ export interface RetryWithProxyOptions {
    * @default Uses the built-in Aluvia client with `process.env.ALUVIA_API_KEY`
    * @example
    * ```ts
-   * import { retryWithProxy } from "playwright-proxied";
+   * import { retryWithProxy } from "page-retry";
    *
    * // Custom proxy provider example
    * const myProxyProvider = {
@@ -170,14 +170,14 @@ export interface RetryWithProxyOptions {
     attempt: number,
     maxRetries: number,
     lastError: unknown
-  ) => unknown;
+  ) => void | Promise<void>;
 
   /**
    * Optional callback fired when a proxy has been successfully fetched.
    *
    * @param proxy The proxy settings that were fetched or provided
    */
-  onProxyLoaded?: (proxy: ProxySettings) => unknown;
+  onProxyLoaded?: (proxy: ProxySettings) => void | Promise<void>;
 }
 
 let aluviaClient: Aluvia | undefined;
