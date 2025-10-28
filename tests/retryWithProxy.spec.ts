@@ -26,6 +26,8 @@ describe("retryWithProxy", () => {
 
   beforeEach(async () => {
     process.env.ALUVIA_API_KEY = "TEST";
+    process.env.ALUVIA_RETRY_ON = "ETIMEDOUT,Timeout,net::ERR";
+
     browser = await chromium.launch({ headless: true });
     const ctx = await browser.newContext();
     page = await ctx.newPage();
