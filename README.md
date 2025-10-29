@@ -43,7 +43,7 @@ await browser.close();
 ## API Key Setup
 
 This SDK uses an Aluvia API key to fetch proxies when retries occur.
-Get your key from your Aluvia account's [Connect to Proxies page](https://dashboard.aluvia.io/connect)
+Get your key from your Aluvia account's [Dev Tools page](https://dashboard.aluvia.io/tools)
 and set it in .env:
 
 ```bash
