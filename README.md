@@ -151,7 +151,7 @@ Contributions are welcome! Please see [CONTRIBUTING.MD](CONTRIBUTING.MD) for gui
 
 ## Support
 
-For bugs, feature requests, or questions, please open an issue on [GitHub](https://github.com/xtrella/page-retry/issues).
+For bugs, feature requests, or questions, please open an issue on [GitHub](https://github.com/aluvia-connect/page-retry/issues).
 
 For commercial support or proxy questions, visit [Aluvia](https://www.aluvia.io/).
 
@@ -161,4 +161,4 @@ MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Author
 
-Xtrella
+Aluvia - [https://www.aluvia.io/](https://www.aluvia.io/)
