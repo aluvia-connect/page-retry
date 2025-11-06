@@ -6,7 +6,7 @@ import type {
   Page,
   Response,
 } from "playwright";
-import Aluvia from "aluvia-ts-sdk";
+import { Server as ProxyChainServer } from "proxy-chain";
 
 const DEFAULT_GOTO_TIMEOUT_MS = 15_000;
 
@@ -178,9 +178,19 @@ export interface RetryWithProxyOptions {
    * @param proxy The proxy settings that were fetched or provided
    */
   onProxyLoaded?: (proxy: ProxySettings) => void | Promise<void>;
+
+  /**
+   * Optional dynamic proxy. If provided, retries will switch upstream proxy
+   * via this local proxy instead of relaunching the browser.
+   *
+   * To use: const dyn = await startDynamicProxy();
+   * chromium.launch({ proxy: { server: dyn.url } })
+   * Then pass { dynamicProxy: dyn } to retryWithProxy().
+   */
+  dynamicProxy?: DynamicProxy;
 }
 
-let aluviaClient: Aluvia | undefined;
+let aluviaClient: any | undefined; // lazy-loaded Aluvia client instance
 
 async function getAluviaProxy(): Promise<ProxySettings> {
   const apiKey = process.env.ALUVIA_API_KEY || "";
@@ -191,7 +201,13 @@ async function getAluviaProxy(): Promise<ProxySettings> {
     );
   }
 
-  aluviaClient ??= new Aluvia(apiKey);
+  if (!aluviaClient) {
+    // Dynamic import to play nicely with test mocks (avoids top-level evaluation before vi.mock)
+    const mod: any = await import("aluvia-ts-sdk");
+    const AluviaCtor = mod?.default || mod;
+    aluviaClient = new AluviaCtor(apiKey);
+  }
+
   const proxy = await aluviaClient.first();
 
   if (!proxy) {
@@ -322,6 +338,7 @@ export function retryWithProxy(
     proxyProvider,
     onRetry,
     onProxyLoaded,
+    dynamicProxy,
   } = options ?? {};
 
   const isRetryable = compileRetryable(retryOn);
@@ -377,6 +394,35 @@ export function retryWithProxy(
           await onProxyLoaded?.(proxy);
         }
 
+        // If dynamic proxy supplied, switch upstream & retry on same page without relaunch.
+        if (dynamicProxy) {
+          await dynamicProxy.setUpstream(proxy);
+
+          for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            if (backoffMs > 0) {
+              const delay = backoffDelay(backoffMs, attempt - 1);
+              await new Promise((r) => setTimeout(r, delay));
+            }
+            await onRetry?.(attempt, maxRetries, lastErr);
+            try {
+              const response = await getRawGoto(basePage)(url, {
+                ...(gotoOptions ?? {}),
+                timeout: gotoOptions?.timeout ?? DEFAULT_GOTO_TIMEOUT_MS,
+                waitUntil: gotoOptions?.waitUntil ?? "domcontentloaded",
+              });
+              return { response: response ?? null, page: basePage };
+            } catch (err) {
+              lastErr = err;
+              if (!isRetryable(err)) break; // stop early on non-retryable error
+              continue; // next attempt
+            }
+          }
+
+          if (lastErr instanceof Error) throw lastErr;
+          throw new Error(lastErr ? String(lastErr) : "Navigation failed");
+        }
+
+        // Original relaunch path if no dynamic proxy provided
         // Retries with proxy
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
           if (backoffMs > 0) {
@@ -438,4 +484,56 @@ export function retryWithProxy(
       return run();
     },
   };
+}
+
+/**
+ * Starts a local proxy-chain server which can have its upstream changed at runtime
+ * without relaunching the browser. Launch Playwright with { proxy: { server: dynamic.url } }.
+ */
+export async function startDynamicProxy(port?: number): Promise<DynamicProxy> {
+  let upstream: ProxySettings | null = null;
+
+  const server = new ProxyChainServer({
+    port: port || 0,
+    prepareRequestFunction: async () => {
+      if (!upstream) return {};
+      let url = upstream.server.startsWith("http") ? upstream.server : `http://${upstream.server}`;
+      if (upstream.username && upstream.password) {
+        try {
+          const u = new URL(url);
+          u.username = upstream.username;
+          u.password = upstream.password;
+          url = u.toString();
+        } catch {}
+      }
+      return { upstreamProxyUrl: url } as any;
+    },
+  });
+
+  await server.listen();
+  const address = server.server.address();
+  const resolvedPort = typeof address === "object" && address ? address.port : port || 8000;
+  const url = `http://127.0.0.1:${resolvedPort}`;
+
+  return {
+    url,
+    async setUpstream(p: ProxySettings | null) {
+      upstream = p;
+    },
+    async close() {
+      try { await server.close(false); } catch {}
+    },
+    currentUpstream() { return upstream; },
+  };
+}
+
+export interface DynamicProxy {
+  /** Local proxy URL (host:port) to be used in Playwright launch options */
+  url: string;
+  /** Update upstream proxy; null disables upstream (direct connection) */
+  setUpstream(proxy: ProxySettings | null): Promise<void>;
+  /** Dispose the local proxy server */
+  close(): Promise<void>;
+  /** Returns the currently configured upstream settings (if any) */
+  currentUpstream(): ProxySettings | null;
 }

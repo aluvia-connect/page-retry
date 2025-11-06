@@ -42,7 +42,8 @@
   ],
   "sideEffects": false,
   "dependencies": {
-    "aluvia-ts-sdk": "^2.1.2"
+    "aluvia-ts-sdk": "^2.1.2",
+    "proxy-chain": "^2.3.0"
   },
   "peerDependencies": {
     "playwright": ">=1.40.0"
