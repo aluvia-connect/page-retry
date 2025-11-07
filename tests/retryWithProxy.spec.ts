@@ -1,16 +1,30 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { retryWithProxy } from "../src/index";
+import * as playwrightMocks from "./__mocks__/playwright";
+import * as aluviaMocks from "./__mocks__/aluvia-ts-sdk";
+
+// Mocks must be declared before importing the module under test (src/index.ts)
+vi.mock("playwright", () => ({
+  chromium: playwrightMocks.chromium,
+  firefox: playwrightMocks.firefox,
+  webkit: playwrightMocks.webkit,
+}));
+
+vi.mock("aluvia-ts-sdk", () => ({
+  default: aluviaMocks.default,
+}));
+
+vi.mock("proxy-chain", () => ({
+  Server: class MockProxyChainServer {
+    server = { address() { return { port: 5555 }; } } as any;
+    async listen() {}
+    async close() {}
+    constructor(_opts?: any) {}
+  }
+}));
+
+// Import after mocks
+import { retryWithProxy, startDynamicProxy } from "../src/index";
 import { FakeBrowser, FakePage, __setOnLaunch } from "./__mocks__/playwright";
-
-vi.mock("playwright", async () => {
-  const mod = await import("./__mocks__/playwright");
-  return { default: mod.default, __setOnLaunch: mod.__setOnLaunch };
-});
-
-vi.mock("aluvia-ts-sdk", async () => {
-  const mod = await import("./__mocks__/aluvia-ts-sdk");
-  return { default: mod.default };
-});
 
 const DATA_OK = "data:text/html,<title>ok</title>ok";
 
@@ -162,5 +176,62 @@ describe("retryWithProxy (mocked Playwright)", () => {
     }).goto(DATA_OK);
 
     expect(await p2.title()).toBe("ok");
+  });
+
+  it("dynamicProxy switches upstream without relaunch", async () => {
+    const dyn = await startDynamicProxy();
+
+    // Force first failure
+    let calls = 0;
+    page.__setGoto(async () => {
+      calls++;
+      if (calls === 1) throw Object.assign(new Error("Timeout"), { code: "Timeout" });
+      return null;
+    });
+
+    const { page: same } = await retryWithProxy(page as any, {
+      maxRetries: 2,
+      backoffMs: 1,
+      dynamicProxy: dyn,
+      retryOn: ["Timeout"],
+      closeOldBrowser: false,
+    }).goto(DATA_OK);
+
+    // Should reuse original page instance
+    expect(same).toBe(page as any);
+    expect(await same.title()).toBe("ok");
+    await dyn.close();
+  });
+
+  it("dynamicProxy does not retry on non-retryable error", async () => {
+    const dyn = await startDynamicProxy();
+    page.__setGoto(async () => { throw new Error("NonRetryable") });
+    await expect(
+      retryWithProxy(page as any, { dynamicProxy: dyn, retryOn: ["Timeout"], maxRetries: 2 }).goto(DATA_OK)
+    ).rejects.toThrow();
+    await dyn.close();
+  });
+
+  it("dynamicProxy performs multiple attempts on retryable errors", async () => {
+    const dyn = await startDynamicProxy();
+    let attempts = 0;
+    page.__setGoto(async () => {
+      attempts++;
+      if (attempts < 3) throw Object.assign(new Error("Timeout"), { code: "Timeout" });
+      return null;
+    });
+    const { page: same } = await retryWithProxy(page as any, { dynamicProxy: dyn, retryOn: ["Timeout"], maxRetries: 5, backoffMs: 0 }).goto(DATA_OK);
+    expect(attempts).toBe(3); // first + two retries
+    expect(same).toBe(page as any);
+    await dyn.close();
+  });
+
+  it("dynamicProxy respects maxRetries", async () => {
+    const dyn = await startDynamicProxy();
+    page.__setGoto(async () => { throw Object.assign(new Error("Timeout"), { code: "Timeout" }); });
+    await expect(
+      retryWithProxy(page as any, { dynamicProxy: dyn, retryOn: ["Timeout"], maxRetries: 0 }).goto(DATA_OK)
+    ).rejects.toThrow();
+    await dyn.close();
   });
 });

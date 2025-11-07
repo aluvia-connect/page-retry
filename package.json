@@ -1,6 +1,6 @@
 {
   "name": "page-retry",
-  "version": "1.1.2",
+  "version": "2.0.0",
   "description": "Automatic retry and proxy fallback for Playwright powered by Aluvia.",
   "type": "module",
   "main": "./dist/cjs/index.js",
@@ -42,7 +42,8 @@
   ],
   "sideEffects": false,
   "dependencies": {
-    "aluvia-ts-sdk": "^2.1.2"
+    "aluvia-ts-sdk": "^2.1.2",
+    "proxy-chain": "^2.3.0"
   },
   "peerDependencies": {
     "playwright": ">=1.40.0"

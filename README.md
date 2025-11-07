@@ -128,6 +128,46 @@ const { response, page } = await retryWithProxy(page, {
 });
 ```
 
+## Dynamic Proxy (No Browser Relaunch)
+
+To avoid relaunching the browser for each retry you can run a local proxy that dynamically swaps its upstream. This keeps all pages, contexts and session state intact.
+
+1. Start the dynamic proxy.
+2. Launch Playwright pointing at its local address.
+3. Pass the dynamic proxy into `retryWithProxy`.
+4. On a retryable failure the upstream proxy is fetched and swapped; navigation is re-attempted on the same page instance.
+
+```ts
+import { chromium } from "playwright";
+import { retryWithProxy, startDynamicProxy } from "page-retry";
+
+// Start local proxy-chain server (random free port)
+const dyn = await startDynamicProxy();
+
+// Launch browser using ONLY the local proxy initially (direct connection upstream)
+const browser = await chromium.launch({ proxy: { server: dyn.url } });
+const context = await browser.newContext();
+const page = await context.newPage();
+
+const { page: samePage } = await retryWithProxy(page, {
+  dynamicProxy: dyn,
+  maxRetries: 2,
+  retryOn: ["Timeout", /net::ERR/],
+  onProxyLoaded: (p) => console.log("Upstream proxy loaded", p.server),
+  onRetry: (a, m) => console.log(`Dynamic retry ${a}/${m}`),
+}).goto("https://blocked-website.example");
+
+console.log(await samePage.title());
+await dyn.close();
+await browser.close();
+```
+
+Notes:
+
+- The first attempt is direct (no upstream proxy). On failure we fetch a proxy and call `dynamicProxy.setUpstream()` internally.
+- Subsequent retries reuse the same browser & page; cookies and session data persist.
+- Provide your own `proxyProvider` if you do not want to use the Aluvia API.
+
 You can integrate this with any proxy API or local pool, as long as it returns a `server`, `username`, and `password`.
 
 ## Requirements
