@@ -9,11 +9,9 @@
  *   npm run build
  *   npx playwright install
  *   ALUVIA_API_KEY=<API KEY> node examples/dynamic-proxy-retry.js
- *
- * In published package usage, replace the relative import with: import { retryWithProxy, startDynamicProxy } from 'page-retry'
  */
 import { chromium } from 'playwright';
-import { retryWithProxy, startDynamicProxy } from '../dist/esm/src/index.js'; // after build; use 'page-retry' when installed
+import { retryWithProxy, startDynamicProxy } from 'page-retry';
 
 // Retry on common timeout/network indicators.
 process.env.ALUVIA_RETRY_ON = 'Timeout,ETIMEDOUT,net::ERR';
